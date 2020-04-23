@@ -18,7 +18,10 @@ fn main() -> serialport::Result<()> {
             if usb.vid != 0x0403 || usb.pid != 0x6010 {
                 continue;
             }
-            process_seiral_port(&info.port_name)?;
+            let ans = process_seiral_port(&info.port_name);
+            if let Err(e) = ans {
+                println!("Process serial port error: {:?}", e);
+            } 
         }
     }
     // println!("Hello, world!");
@@ -33,21 +36,29 @@ fn process_seiral_port(port_name: &str) -> serialport::Result<()> {
     a.set_data_bits(DataBits::Eight)?;
     a.set_parity(Parity::None)?;
     a.set_stop_bits(StopBits::One)?;
-    a.set_timeout(core::time::Duration::from_secs_f32(1.0))?;
+    a.set_timeout(core::time::Duration::from_secs_f32(2.0))?;
     // println!("{:?}", a.timeout());
     // println!("{:?}", a.settings());
 
+    // reset to ISP mode
+    // boot: LOW, reset: LOW
+    a.write_data_terminal_ready(false)?;
     a.write_request_to_send(false)?;
-    a.write_data_terminal_ready(false)?;
     std::thread::sleep(core::time::Duration::from_secs_f32(0.1));
+    // boot: HIGH
     a.write_data_terminal_ready(true)?;
+    a.write_request_to_send(false)?;
     std::thread::sleep(core::time::Duration::from_secs_f32(0.1));
-    a.write_data_terminal_ready(false)?;
+    // reset: HIGH
+    a.write_data_terminal_ready(false)?; 
+    a.write_request_to_send(true)?;
     std::thread::sleep(core::time::Duration::from_secs_f32(0.1));
+    // end reset to ISP mode 
 
     a.write(GREETING)?;
     a.flush()?;
-    std::thread::sleep(core::time::Duration::from_secs_f32(0.1));
+    println!("Write greeting");
+    
     let mut recv = [0]; // 1 byte
     let ans = a.read(&mut recv);
     if let Err(e) = ans {
@@ -59,7 +70,7 @@ fn process_seiral_port(port_name: &str) -> serialport::Result<()> {
     flash_dataframe(a.as_mut(), STAGE_1_BIN, STAGE_1_BASE)?;
 
     println!("Write stage 1 finished");
-    
+
     Ok(())
 }
 
@@ -91,8 +102,9 @@ fn flash_dataframe(serial: &mut dyn SerialPort, data: &[u8], base_addr: u64) -> 
 }
 
 fn receive_debug(serial: &mut dyn SerialPort) -> serialport::Result<()> {
-    let mut recv = [0]; // 1 byte
-    let ans = serial.read(&mut recv)?;
-    let _ = ans; // todo: unused
+    let mut recv = [0u8; 1]; // 1 byte
+    let _len = serial.read(&mut recv)?;
+    println!("Receive: 0x{:02X}", recv[0]); // trace
+    let _ = recv; // unused
     Ok(())
 }
