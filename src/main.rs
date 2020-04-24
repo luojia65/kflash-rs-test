@@ -40,32 +40,9 @@ fn process_seiral_port(port_name: &str) -> serialport::Result<()> {
     // println!("{:?}", a.timeout());
     // println!("{:?}", a.settings());
 
-    // reset to ISP mode
-    // boot: LOW, reset: LOW
-    a.write_data_terminal_ready(false)?;
-    a.write_request_to_send(false)?;
-    std::thread::sleep(core::time::Duration::from_secs_f32(0.1));
-    // boot: HIGH
-    a.write_data_terminal_ready(true)?;
-    a.write_request_to_send(false)?;
-    std::thread::sleep(core::time::Duration::from_secs_f32(0.1));
-    // reset: HIGH
-    a.write_data_terminal_ready(false)?; 
-    a.write_request_to_send(true)?;
-    std::thread::sleep(core::time::Duration::from_secs_f32(0.1));
-    // end reset to ISP mode 
+    reset_isp_mode(a.as_mut())?;
 
-    a.write(GREETING)?;
-    a.flush()?;
-    println!("Write greeting");
-    
-    let mut recv = [0]; // 1 byte
-    let ans = a.read(&mut recv);
-    if let Err(e) = ans {
-        // println!("Error occurred");
-        return Err(e.into());
-    }
-    println!("Answer: 0x{:X}", recv[0]);
+    greeting(a.as_mut())?;
 
     flash_dataframe(a.as_mut(), STAGE_1_BIN, STAGE_1_BASE)?;
 
@@ -74,26 +51,60 @@ fn process_seiral_port(port_name: &str) -> serialport::Result<()> {
     Ok(())
 }
 
+fn reset_isp_mode(serial: &mut dyn SerialPort) -> serialport::Result<()> {
+    println!("Reset to ISP mode");
+    // boot: LOW, reset: LOW
+    serial.write_data_terminal_ready(false)?;
+    serial.write_request_to_send(false)?;
+    std::thread::sleep(core::time::Duration::from_secs_f32(0.1));
+    // boot: HIGH
+    serial.write_data_terminal_ready(true)?;
+    serial.write_request_to_send(false)?;
+    std::thread::sleep(core::time::Duration::from_secs_f32(0.1));
+    // reset: HIGH
+    serial.write_data_terminal_ready(false)?; 
+    serial.write_request_to_send(true)?;
+    std::thread::sleep(core::time::Duration::from_secs_f32(0.1));
+    Ok(())
+}
+
+fn greeting(serial: &mut dyn SerialPort) -> serialport::Result<()> {
+    println!("Write greeting");
+    serial.write(GREETING)?;
+    let greeting_answer = recv_one_return(serial)?;
+    println!("Greeting answer: {:?}", greeting_answer);
+    Ok(())
+}
+
 fn flash_dataframe(serial: &mut dyn SerialPort, data: &[u8], base_addr: u64) -> serialport::Result<()> {
+    println!("Begin flash dataframe");
     let mut address = base_addr;
     for chunk in data.chunks(DATAFRAME_SIZE) {
+        println!("Begin write addr 0x{:08X}", address);
         let mut out = BytesMut::with_capacity(2 + 2 + 4 + 4 + 4 + chunk.len());
         let mut digest = crc32::Digest::new(crc32::IEEE);
         digest.write(&(address as u32).to_le_bytes());
         digest.write(&(chunk.len() as u32).to_le_bytes());
         digest.write(chunk);
         let checksum = digest.sum32();
+        println!("Checksum: {:08x}", checksum);
         out.put_u16_le(0x00C3);
         out.put_u16_le(0x0000);
         out.put_u32_le(checksum);
         out.put_u32_le(address as u32);
         out.put_u32_le(chunk.len() as u32);
         out.put_slice(chunk);
+        
+        println!("{}", out.len());
+        println!("{:?}", out);
+
         address += chunk.len() as u64;
         loop {
-            println!("Write addr 0x{:08X}", address);
             serial.write(&out)?;
-            if let Ok(()) = receive_debug(serial) {
+            serial.flush()?;
+            let received = receive_debug(serial);
+            println!("Received {:?}", received);
+            if let Ok(true) = received {
                 break;
             }
         }
@@ -101,10 +112,50 @@ fn flash_dataframe(serial: &mut dyn SerialPort, data: &[u8], base_addr: u64) -> 
     Ok(())
 }
 
-fn receive_debug(serial: &mut dyn SerialPort) -> serialport::Result<()> {
-    let mut recv = [0u8; 1]; // 1 byte
-    let _len = serial.read(&mut recv)?;
-    println!("Receive: 0x{:02X}", recv[0]); // trace
-    let _ = recv; // unused
-    Ok(())
+fn receive_debug(serial: &mut dyn SerialPort) -> serialport::Result<bool> {
+    let one_return = recv_one_return(serial)?;
+    let op = one_return[0];
+    let reason = one_return[1];
+    println!("Return op: 0x{:02X}", op);
+    println!("ISP response: 0x{:02X}", reason);
+    if reason != 0x00 && reason != 0xE0 {
+        println!("ISP return check failed!");
+        return Ok(false);
+    }
+    return Ok(true);
+}
+
+fn recv_one_return(serial: &mut dyn SerialPort) -> serialport::Result<Vec<u8>> {
+    let mut recv = [0u8; 1];
+    while recv[0] != 0xC0 {
+        let _len = serial.read(&mut recv)?;
+        println!("Receive: 0x{:02X}", recv[0]); // trace
+    }
+    let mut recv = [0u8; 1];
+    let mut ans: Vec<u8> = Vec::new();
+    let mut in_escape = false;
+    loop {
+        let _len = serial.read(&mut recv)?;
+        if recv[0] == 0xC0 {
+            break
+        } else if in_escape {
+            in_escape = false;
+            if recv[0] == 0xDC {
+                ans.push(0xC0);
+            } else if recv[0] == 0xDD {
+                ans.push(0xDB);
+            } else {
+                panic!("Invalid SLIP escape!")
+            }
+        } else if recv[0] == 0xDB {
+            in_escape = true;
+        }
+        ans.push(recv[0]);
+    }
+    print!("Receive one: ");
+    for i in &ans {
+        print!("0x{:02X} ", i);
+    }
+    println!();
+    Ok(ans)
 }
